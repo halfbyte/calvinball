@@ -1,21 +1,16 @@
 (function() {
-
-  var socket = new io.Socket(); 
-  socket.connect();
-  socket.on('connect', function(data){ console.log("connect", data); 
-    socket.send({command: 'hello'});
-  }); 
-  socket.on('message', function(data){ console.log("message", data); });
-  socket.on('disconnect', function(){ console.log("disconnect"); socket.connect(); });
-
-
-  var MODE_INTERACTIVE = 0;
-  var MODE_PLAY = 1;
+  
+  var MODE_WAITING = 0;
+  var MODE_INTERACTIVE = 1;
+  var MODE_PLAY = 2;
+  var MODE_WAITING_FOR_PLAY = 3;
   var playTimer = 0;
 
   var SCALE = 10;
   
-  var mode = MODE_INTERACTIVE;
+  var mode = MODE_WAITING;
+  var sessionId;
+  var myPlayer = 0;
   var ctx;
   var canvas;
   var world;
@@ -79,9 +74,6 @@
     };
      
     addPlayer(5,5);
-    addPlayer(6,5);
-    addPlayer(9,6);
-    addPlayer(12,5);
     addBall(13,6)
     var debugDraw = new b2DebugDraw();
     debugDraw.SetSprite(ctx);
@@ -122,24 +114,28 @@
       if (Math.round(playTime() / 1000))
       if (mode === MODE_PLAY) {
         applyReverseMagnetism();
-        if (playTime() > 5000 && !ball.IsAwake()) {
-          stop();
+        if ((playTime() > 5000 && !ball.IsAwake()) || playTime() > 10000) {
+          finished_play();
         }
-      } else {
+      } else if (mode == MODE_INTERACTIVE ){
         var second = 5 - Math.floor(playTime() / 1000);
         if (second !== last_second) {
           $('#timer').html(second);
           last_second = second;
         }
         if (playTime() > 5000) play();
+      } else {
+        // waiting
       }
-      world.Step(
-         1 / 60   //frame-rate
-         ,  10       //velocity iterations
-         ,  10       //position iterations
-      );
-      world.DrawDebugData();
-      world.ClearForces();
+      if (mode === MODE_PLAY || mode === MODE_INTERACTIVE) {
+        world.Step(
+           1 / 60   //frame-rate
+           ,  10       //velocity iterations
+           ,  10       //position iterations
+        );
+        world.DrawDebugData();
+        world.ClearForces();        
+      }
       requestAnimFrame(update);
       
     };
@@ -147,29 +143,29 @@
     var isMoving = 0;
 
     var move = function(e) {
-      if (mode === MODE_PLAY) return;
+      if (mode !== MODE_INTERACTIVE) return;
       var offset = $(this).offset();
       var x = e.pageX - offset.left;
       var y = e.pageY - offset.top;
       console.log(x,y);
       console.log(bodies[0]);
-      bodies[0].SetPosition(new b2Vec2(x / SCALE,y / SCALE));
+      bodies[myPlayer].SetPosition(new b2Vec2(x / SCALE,y / SCALE));
       sendPosition(x / SCALE, y / SCALE);
     };
 
     var startMove = function() {
-      if (mode === MODE_PLAY) return;
+      if (mode !== MODE_INTERACTIVE) return;
       console.log("startmove");
       $(canvas).mousemove(move);
     };
 
     var endMove = function(e) {
-      if (mode === MODE_PLAY) return;
+      if (mode !== MODE_INTERACTIVE) return;
       var offset = $(this).offset();
       var x = e.pageX - offset.left;
       var y = e.pageY - offset.top;
       $(canvas).unbind('mousemove');
-      bodies[0].SetPosition(new b2Vec2(x / SCALE,y / SCALE));
+      bodies[myPlayer].SetPosition(new b2Vec2(x / SCALE,y / SCALE));
       sendPosition(x / SCALE, y / SCALE);
     };
     
@@ -180,13 +176,13 @@
     var play = function() {
       $('#timer').html("");
       socket.send({command: 'playable'});
-      
-      
-      console.log("PLAY");
-      mode = MODE_PLAY;
-      playTimer = new Date().getTime();
+      mode = MODE_WAITING_FOR_PLAY;
     };
-    
+    var finished_play = function() {
+      console.log("FINISHED");
+      mode = MODE_WAITING;
+      socket.send({command: 'finished_play'});
+    };
     var stop = function() {
       console.log("STOP");
       mode = MODE_INTERACTIVE;
@@ -199,9 +195,51 @@
 
     $(canvas).mousedown(startMove).mouseup(endMove);
       
-    
-    stop();
+    $('#timer').html("WAIT");
+    //stop();
     update();
+
+    var connect = function(){ 
+      socket.send({command: 'hello'});
+    }; 
+    
+    var receive = function(data) {
+      if (data.command === 'hello') {
+        console.log("Got me a session id!", data.you);
+        sessionId = data.you;
+      } else 
+      if (data.command === 'players') {
+        $.each(bodies, function() {
+          world.DestroyBody(this);
+        });
+        bodies = [];
+        $.each(data.players, function(i) {
+          addPlayer(this.x, this.y);
+          if (this.sessionId === sessionId) {
+            myPlayer = i;
+          }
+        });
+      } else
+      if (data.command === 'start') {
+        // oh the irony.
+        stop();
+      } else
+      if (data.command === 'play') {
+        console.log("PLAY");
+        mode = MODE_PLAY;
+        playTimer = new Date().getTime();          
+      } else {
+        console.log("Unknown message", data);
+      }
+      
+    };
+
+    var socket = new io.Socket(); 
+    socket.connect();
+    socket.on('connect', connect);    
+    socket.on('message', receive);
+    socket.on('disconnect', function(){ console.log("disconnect"); socket.connect(); });
+
     
     
   };
